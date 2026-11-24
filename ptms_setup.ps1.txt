@@ -1,0 +1,1824 @@
+﻿<#
+  PTMS - Property & Tenant Management System
+  Starter project generator (Flutter / Android / GetX / SQLite)
+
+  Usage (PowerShell):
+    .\ptms_setup.ps1                      # creates .\ptms
+    .\ptms_setup.ps1 -ProjectName ptms -Path D:\Projects
+
+  Requires: Flutter SDK on PATH (optional; files are still written without it).
+#>
+param(
+  [string]$ProjectName = 'ptms',
+  [string]$Path = (Get-Location).Path
+)
+
+$ErrorActionPreference = 'Stop'
+$Root = Join-Path $Path $ProjectName
+$Utf8 = New-Object System.Text.UTF8Encoding($false)
+
+function Write-File([string]$RelPath, [string]$Content) {
+  $full = Join-Path $Root $RelPath
+  $dir = Split-Path $full -Parent
+  if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+  [System.IO.File]::WriteAllText($full, $Content.TrimStart("`r", "`n"), $Utf8)
+  Write-Host "  + $RelPath"
+}
+
+# ---------------------------------------------------------------- flutter create
+$hasFlutter = $null -ne (Get-Command flutter -ErrorAction SilentlyContinue)
+if ($hasFlutter) {
+  Write-Host "Creating Flutter project '$ProjectName' ..." -ForegroundColor Cyan
+  & flutter create --org com.ptms --platforms android --project-name $ProjectName $Root
+  $defaultTest = Join-Path $Root 'test\widget_test.dart'
+  if (Test-Path $defaultTest) { Remove-Item $defaultTest -Force }
+} else {
+  Write-Host "Flutter not found on PATH - writing files only. Run 'flutter create' later." -ForegroundColor Yellow
+  New-Item -ItemType Directory -Path $Root -Force | Out-Null
+}
+
+Write-Host "Writing project files ..." -ForegroundColor Cyan
+
+# ---------------------------------------------------------------- pubspec.yaml
+Write-File 'pubspec.yaml' @'
+name: ptms
+description: Property & Tenant Management System (local-first, single owner).
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  get: ^4.6.6
+  get_storage: ^2.1.1
+  sqflite: ^2.3.3
+  path: ^1.9.0
+  path_provider: ^2.1.4
+  intl: any
+  crypto: ^3.0.3
+  pdf: ^3.11.0
+  printing: ^5.13.0
+  file_picker: ^8.1.0
+  image_picker: ^1.1.2
+  share_plus: ^10.0.0
+  open_filex: ^4.5.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/fonts/
+'@
+
+Write-File 'assets/fonts/README.txt' @'
+Place an Arabic-capable TTF here for PDF generation, named:
+  Cairo-Regular.ttf   (regular)
+  Cairo-Bold.ttf      (bold)
+Download Cairo (OFL license) from Google Fonts. Without these files the PDF
+service falls back to the default font, which does NOT render Arabic.
+'@
+
+# ---------------------------------------------------------------- main.dart
+Write-File 'lib/main.dart' @'
+import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:get/get.dart';
+import 'package:get_storage/get_storage.dart';
+
+import 'core/locale/app_translations.dart';
+import 'core/services/database_service.dart';
+import 'core/services/obligation_service.dart';
+import 'core/services/session_service.dart';
+import 'core/services/storage_service.dart';
+import 'core/theme/app_theme.dart';
+import 'initial_binding.dart';
+import 'routes/app_pages.dart';
+import 'routes/app_routes.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await GetStorage.init();
+  await Get.putAsync(() => StorageService().init(), permanent: true);
+  await Get.putAsync(() => DatabaseService().init(), permanent: true);
+  Get.put(SessionService(), permanent: true);
+  Get.put(ObligationService(), permanent: true);
+  runApp(const PtmsApp());
+}
+
+class PtmsApp extends StatelessWidget {
+  const PtmsApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final storage = Get.find<StorageService>();
+    return GetMaterialApp(
+      title: 'PTMS',
+      debugShowCheckedModeBanner: false,
+      translations: AppTranslations(),
+      locale: storage.locale,
+      fallbackLocale: const Locale('en', 'US'),
+      supportedLocales: const [Locale('ar', 'SA'), Locale('en', 'US')],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
+      theme: AppTheme.light,
+      darkTheme: AppTheme.dark,
+      themeMode: storage.themeMode,
+      initialBinding: InitialBinding(),
+      initialRoute: Routes.splash,
+      getPages: AppPages.pages,
+      unknownRoute: AppPages.notFound,
+    );
+  }
+}
+'@
+
+Write-File 'lib/initial_binding.dart' @'
+import 'package:get/get.dart';
+
+import 'features/properties/data/property_repository.dart';
+
+class InitialBinding extends Bindings {
+  @override
+  void dependencies() {
+    Get.lazyPut<PropertyRepository>(() => PropertyRepository(), fenix: true);
+  }
+}
+'@
+
+# ---------------------------------------------------------------- core/constants
+Write-File 'lib/core/constants/app_constants.dart' @'
+class AppConstants {
+  static const dbName = 'ptms.db';
+  static const dbVersion = 1;
+  static const defaultCurrency = 'SAR';
+}
+
+class UnitStatus {
+  static const available = 'available';
+  static const rented = 'rented';
+  static const maintenance = 'maintenance';
+  static const inactive = 'inactive';
+}
+
+class ContractStatus {
+  static const draft = 'draft';
+  static const active = 'active';
+  static const expired = 'expired';
+  static const cancelled = 'cancelled';
+  static const suspended = 'suspended';
+}
+
+class ObligationStatus {
+  static const unpaid = 'unpaid';
+  static const partial = 'partial';
+  static const paid = 'paid';
+  static const overdue = 'overdue';
+  static const cancelled = 'cancelled';
+}
+
+class ObligationType {
+  static const rent = 'rent';
+  static String service(int serviceId) => 'service:$serviceId';
+}
+
+class ServiceBilling {
+  static const fixedMonthly = 'fixed_monthly';
+  static const consumption = 'consumption';
+  static const oneTime = 'one_time';
+}
+
+class ServiceSplit {
+  static const equal = 'equal';
+  static const area = 'area';
+  static const consumption = 'consumption';
+  static const direct = 'direct';
+}
+
+class PaymentMethod {
+  static const cash = 'cash';
+  static const bank = 'bank_transfer';
+  static const wallet = 'e_wallet';
+  static const other = 'other';
+}
+'@
+
+# ---------------------------------------------------------------- core/theme
+Write-File 'lib/core/theme/app_theme.dart' @'
+import 'package:flutter/material.dart';
+
+class AppTheme {
+  static const _seed = Color(0xFF1B6B5A);
+
+  static ThemeData get light => ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(seedColor: _seed),
+        appBarTheme: const AppBarTheme(centerTitle: true),
+        inputDecorationTheme:
+            const InputDecorationTheme(border: OutlineInputBorder()),
+      );
+
+  static ThemeData get dark => ThemeData(
+        useMaterial3: true,
+        colorScheme:
+            ColorScheme.fromSeed(seedColor: _seed, brightness: Brightness.dark),
+        appBarTheme: const AppBarTheme(centerTitle: true),
+        inputDecorationTheme:
+            const InputDecorationTheme(border: OutlineInputBorder()),
+      );
+}
+'@
+
+# ---------------------------------------------------------------- core/locale
+Write-File 'lib/core/locale/app_translations.dart' @'
+import 'package:get/get.dart';
+
+class AppTranslations extends Translations {
+  @override
+  Map<String, Map<String, String>> get keys => {
+        'en_US': _en,
+        'ar_SA': _ar,
+      };
+
+  static const _en = {
+    'app_name': 'Property Manager',
+    'dashboard': 'Dashboard',
+    'properties': 'Properties',
+    'units': 'Units',
+    'services': 'Services',
+    'tenants': 'Tenants',
+    'contracts': 'Contracts',
+    'obligations': 'Financial Obligations',
+    'payments': 'Payments',
+    'documents': 'Documents',
+    'reports': 'Reports',
+    'settings': 'Settings',
+    'about': 'About',
+    'not_found': 'Page not found',
+    'add': 'Add',
+    'edit': 'Edit',
+    'delete': 'Delete',
+    'save': 'Save',
+    'cancel': 'Cancel',
+    'confirm': 'Confirm',
+    'name': 'Name',
+    'address': 'Address',
+    'floors': 'Floors',
+    'notes': 'Notes',
+    'description': 'Description',
+    'required': 'Required',
+    'language': 'Language',
+    'theme_dark': 'Dark mode',
+    'set_pin': 'Set / change PIN',
+    'remove_pin': 'Remove PIN',
+    'enter_pin': 'Enter PIN',
+    'new_pin': 'New PIN (4-6 digits)',
+    'wrong_pin': 'Wrong PIN',
+    'unlock': 'Unlock',
+    'coming_soon': 'This module is coming soon',
+    'no_data': 'No records yet',
+    'delete_confirm': 'Delete this record?',
+    'cannot_delete_has_units': 'Cannot delete: property has units',
+    'rented_units': 'Rented units',
+    'available_units': 'Available units',
+    'active_contracts': 'Active contracts',
+    'due_this_month': 'Due this month',
+    'paid': 'Paid',
+    'remaining': 'Remaining',
+    'overdue': 'Overdue',
+    'currency': 'Currency',
+    'backup': 'Backup database',
+    'obligations_created': 'Monthly obligations created',
+  };
+
+  static const _ar = {
+    'app_name': 'مدير العقارات',
+    'dashboard': 'لوحة التحكم',
+    'properties': 'العقارات',
+    'units': 'الوحدات',
+    'services': 'الخدمات',
+    'tenants': 'المستأجرون',
+    'contracts': 'العقود',
+    'obligations': 'الالتزامات المالية',
+    'payments': 'المدفوعات',
+    'documents': 'المستندات',
+    'reports': 'التقارير',
+    'settings': 'الإعدادات',
+    'about': 'حول التطبيق',
+    'not_found': 'الصفحة غير موجودة',
+    'add': 'إضافة',
+    'edit': 'تعديل',
+    'delete': 'حذف',
+    'save': 'حفظ',
+    'cancel': 'إلغاء',
+    'confirm': 'تأكيد',
+    'name': 'الاسم',
+    'address': 'العنوان',
+    'floors': 'عدد الطوابق',
+    'notes': 'ملاحظات',
+    'description': 'الوصف',
+    'required': 'حقل مطلوب',
+    'language': 'اللغة',
+    'theme_dark': 'الوضع الداكن',
+    'set_pin': 'تعيين / تغيير PIN',
+    'remove_pin': 'إزالة PIN',
+    'enter_pin': 'أدخل رمز PIN',
+    'new_pin': 'رمز PIN جديد (4-6 أرقام)',
+    'wrong_pin': 'رمز PIN غير صحيح',
+    'unlock': 'فتح',
+    'coming_soon': 'هذه الوحدة قيد التطوير',
+    'no_data': 'لا توجد سجلات بعد',
+    'delete_confirm': 'هل تريد حذف هذا السجل؟',
+    'cannot_delete_has_units': 'لا يمكن الحذف: العقار يحتوي على وحدات',
+    'rented_units': 'الوحدات المؤجرة',
+    'available_units': 'الوحدات المتاحة',
+    'active_contracts': 'العقود النشطة',
+    'due_this_month': 'المستحق هذا الشهر',
+    'paid': 'المدفوع',
+    'remaining': 'المتبقي',
+    'overdue': 'المتأخرات',
+    'currency': 'العملة',
+    'backup': 'نسخة احتياطية',
+    'obligations_created': 'تم إنشاء الالتزامات الشهرية',
+  };
+}
+'@
+
+# ---------------------------------------------------------------- core/services
+Write-File 'lib/core/services/storage_service.dart' @'
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+import 'package:get_storage/get_storage.dart';
+
+import '../constants/app_constants.dart';
+
+/// Simple key/value settings (language, theme, PIN, currency, owner info).
+/// Relational data lives in SQLite, never here.
+class StorageService extends GetxService {
+  late final GetStorage _box;
+
+  Future<StorageService> init() async {
+    _box = GetStorage();
+    return this;
+  }
+
+  // ---- language
+  Locale get locale => (_box.read<String>('lang') ?? 'ar') == 'ar'
+      ? const Locale('ar', 'SA')
+      : const Locale('en', 'US');
+
+  Future<void> setLang(String code) async {
+    await _box.write('lang', code);
+    Get.updateLocale(locale);
+  }
+
+  // ---- theme
+  ThemeMode get themeMode =>
+      (_box.read<bool>('dark') ?? false) ? ThemeMode.dark : ThemeMode.light;
+
+  Future<void> setDark(bool v) async {
+    await _box.write('dark', v);
+    Get.changeThemeMode(themeMode);
+  }
+
+  // ---- PIN (salted SHA-256 hash, never the raw PIN)
+  bool get hasPin => (_box.read<String>('pin_hash') ?? '').isNotEmpty;
+
+  String _hash(String pin) {
+    const salt = 'ptms.v1.';
+    return sha256.convert(utf8.encode('$salt$pin')).toString();
+  }
+
+  Future<void> setPin(String pin) => _box.write('pin_hash', _hash(pin));
+  Future<void> removePin() => _box.remove('pin_hash');
+  bool verifyPin(String pin) => _box.read<String>('pin_hash') == _hash(pin);
+
+  // ---- currency & owner
+  String get currency =>
+      _box.read<String>('currency') ?? AppConstants.defaultCurrency;
+  Future<void> setCurrency(String v) => _box.write('currency', v);
+
+  Map<String, dynamic> get owner =>
+      Map<String, dynamic>.from(_box.read('owner') ?? {});
+  Future<void> setOwner(Map<String, dynamic> v) => _box.write('owner', v);
+}
+'@
+
+Write-File 'lib/core/services/session_service.dart' @'
+import 'package:get/get.dart';
+
+/// In-memory session state (resets each app launch).
+class SessionService extends GetxService {
+  bool unlocked = false;
+}
+'@
+
+Write-File 'lib/core/services/database_service.dart' @'
+import 'dart:io';
+
+import 'package:get/get.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:sqflite/sqflite.dart';
+
+import '../constants/app_constants.dart';
+
+class DatabaseService extends GetxService {
+  late final Database db;
+  late final String dbPath;
+
+  Future<DatabaseService> init() async {
+    final dir = await getApplicationDocumentsDirectory();
+    dbPath = p.join(dir.path, AppConstants.dbName);
+    db = await openDatabase(
+      dbPath,
+      version: AppConstants.dbVersion,
+      onConfigure: (d) => d.execute('PRAGMA foreign_keys = ON'),
+      onCreate: _onCreate,
+    );
+    return this;
+  }
+
+  /// Copies the database file so the owner can save it outside the app.
+  Future<File> createBackupCopy() async {
+    final dir = await getTemporaryDirectory();
+    final stamp = DateTime.now().toIso8601String().replaceAll(':', '-');
+    final target = p.join(dir.path, 'ptms_backup_$stamp.db');
+    await db.execute('PRAGMA wal_checkpoint(FULL)');
+    return File(dbPath).copy(target);
+  }
+
+  Future<void> _onCreate(Database d, int v) async {
+    final batch = d.batch();
+
+    batch.execute('''
+      CREATE TABLE properties(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        description TEXT,
+        address TEXT,
+        floors INTEGER DEFAULT 1,
+        notes TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )''');
+
+    batch.execute('''
+      CREATE TABLE units(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+        number TEXT NOT NULL,
+        floor INTEGER,
+        type TEXT,
+        area REAL,
+        base_rent REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'available',
+        description TEXT,
+        notes TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(property_id, number)
+      )''');
+
+    batch.execute('''
+      CREATE TABLE tenants(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        full_name TEXT NOT NULL,
+        phone TEXT,
+        national_id TEXT,
+        address TEXT,
+        notes TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )''');
+
+    batch.execute('''
+      CREATE TABLE contracts(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+        unit_id INTEGER NOT NULL REFERENCES units(id) ON DELETE RESTRICT,
+        status TEXT NOT NULL DEFAULT 'draft',
+        start_date TEXT NOT NULL,
+        end_date TEXT NOT NULL,
+        rent_amount REAL NOT NULL,
+        deposit_amount REAL NOT NULL DEFAULT 0,
+        payment_cycle TEXT NOT NULL DEFAULT 'monthly',
+        due_day INTEGER NOT NULL DEFAULT 1,
+        payment_method TEXT,
+        renewal_terms TEXT,
+        termination_terms TEXT,
+        terms_text TEXT,
+        owner_snapshot TEXT,
+        tenant_snapshot TEXT,
+        pdf_path TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )''');
+
+    batch.execute('''
+      CREATE TABLE services(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        billing_type TEXT NOT NULL,
+        split_method TEXT NOT NULL DEFAULT 'direct',
+        amount REAL NOT NULL DEFAULT 0,
+        property_id INTEGER REFERENCES properties(id) ON DELETE RESTRICT,
+        unit_id INTEGER REFERENCES units(id) ON DELETE RESTRICT,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        notes TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )''');
+
+    batch.execute('''
+      CREATE TABLE service_readings(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        service_id INTEGER NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+        unit_id INTEGER NOT NULL REFERENCES units(id) ON DELETE RESTRICT,
+        period TEXT NOT NULL,
+        quantity REAL NOT NULL DEFAULT 0,
+        amount REAL NOT NULL DEFAULT 0,
+        UNIQUE(service_id, unit_id, period)
+      )''');
+
+    batch.execute('''
+      CREATE TABLE obligations(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+        contract_id INTEGER NOT NULL REFERENCES contracts(id) ON DELETE RESTRICT,
+        property_id INTEGER,
+        unit_id INTEGER,
+        type TEXT NOT NULL,
+        period TEXT NOT NULL,
+        due_date TEXT NOT NULL,
+        amount REAL NOT NULL,
+        paid_amount REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'unpaid',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )''');
+    // Idempotency guarantee: one obligation per contract + period + type.
+    batch.execute(
+        'CREATE UNIQUE INDEX ux_obligation ON obligations(contract_id, period, type)');
+    batch.execute('CREATE INDEX ix_obl_status ON obligations(status, due_date)');
+
+    batch.execute('''
+      CREATE TABLE payments(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+        contract_id INTEGER NOT NULL REFERENCES contracts(id) ON DELETE RESTRICT,
+        obligation_id INTEGER NOT NULL REFERENCES obligations(id) ON DELETE RESTRICT,
+        paid_on TEXT NOT NULL,
+        amount REAL NOT NULL,
+        method TEXT NOT NULL DEFAULT 'cash',
+        reference TEXT,
+        notes TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )''');
+
+    batch.execute('''
+      CREATE TABLE documents(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_type TEXT NOT NULL,
+        owner_id INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        mime TEXT,
+        size_bytes INTEGER,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )''');
+    batch.execute('CREATE INDEX ix_doc_owner ON documents(owner_type, owner_id)');
+
+    await batch.commit(noResult: true);
+  }
+}
+'@
+
+Write-File 'lib/core/services/obligation_service.dart' @'
+import 'dart:math';
+
+import 'package:get/get.dart';
+import 'package:sqflite/sqflite.dart';
+
+import '../constants/app_constants.dart';
+import 'database_service.dart';
+
+/// Creates monthly rent obligations for active contracts.
+/// Runs on every app start and catches up on all missed months.
+/// Safe to run repeatedly: a UNIQUE index (contract, period, type) plus
+/// INSERT OR IGNORE prevents duplicates.
+class ObligationService extends GetxService {
+  DatabaseService get _db => Get.find<DatabaseService>();
+
+  static String periodOf(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}';
+
+  static String _iso(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  /// Returns the number of obligations created.
+  Future<int> runCatchUp({DateTime? now}) async {
+    now ??= DateTime.now();
+    final db = _db.db;
+    var created = 0;
+
+    await db.transaction((txn) async {
+      final contracts = await txn.query('contracts',
+          where: 'status = ?', whereArgs: [ContractStatus.active]);
+
+      for (final c in contracts) {
+        final start = DateTime.parse(c['start_date'] as String);
+        final end = DateTime.parse(c['end_date'] as String);
+        final dueDay = (c['due_day'] as int?) ?? 1;
+        final unit = (await txn.query('units',
+                where: 'id = ?', whereArgs: [c['unit_id']], limit: 1))
+            .first;
+
+        var cursor = DateTime(start.year, start.month);
+        final last = DateTime(now!.year, now.month);
+        final lastForContract = DateTime(end.year, end.month);
+
+        while (!cursor.isAfter(last) && !cursor.isAfter(lastForContract)) {
+          final daysInMonth = DateTime(cursor.year, cursor.month + 1, 0).day;
+          final due =
+              DateTime(cursor.year, cursor.month, min(dueDay, daysInMonth));
+
+          // TODO(v1.1): prorate first/last month if the owner chooses to.
+          final id = await txn.insert(
+            'obligations',
+            {
+              'tenant_id': c['tenant_id'],
+              'contract_id': c['id'],
+              'property_id': unit['property_id'],
+              'unit_id': c['unit_id'],
+              'type': ObligationType.rent,
+              'period': periodOf(cursor),
+              'due_date': _iso(due),
+              'amount': c['rent_amount'],
+              'status': ObligationStatus.unpaid,
+            },
+            conflictAlgorithm: ConflictAlgorithm.ignore,
+          );
+          if (id > 0) created++;
+
+          cursor = DateTime(cursor.year, cursor.month + 1);
+        }
+
+        // TODO: add fixed-monthly and consumption service obligations here
+        // (type = ObligationType.service(serviceId)).
+      }
+
+      // Expire contracts whose end date has passed (after generating).
+      await txn.update(
+        'contracts',
+        {'status': ContractStatus.expired},
+        where: 'status = ? AND end_date < ?',
+        whereArgs: [ContractStatus.active, _iso(now!)],
+      );
+
+      // Flag late obligations.
+      await txn.rawUpdate(
+        'UPDATE obligations SET status = ? '
+        'WHERE status IN (?, ?) AND due_date < ?',
+        [
+          ObligationStatus.overdue,
+          ObligationStatus.unpaid,
+          ObligationStatus.partial,
+          _iso(now),
+        ],
+      );
+    });
+
+    return created;
+  }
+}
+'@
+
+Write-File 'lib/core/services/api_client.dart' @'
+import 'package:get/get.dart';
+
+/// Placeholder for future server sync (v1 is fully offline).
+class ApiClient extends GetConnect {
+  @override
+  void onInit() {
+    httpClient.baseUrl = 'https://example.invalid';
+    httpClient.timeout = const Duration(seconds: 20);
+  }
+}
+'@
+
+Write-File 'lib/core/utils/formatters.dart' @'
+import 'package:get/get.dart';
+import 'package:intl/intl.dart';
+
+import '../services/storage_service.dart';
+
+String formatMoney(num v) {
+  final cur = Get.find<StorageService>().currency;
+  return '${NumberFormat('#,##0.00').format(v)} $cur';
+}
+
+String formatDate(DateTime d) => DateFormat('yyyy-MM-dd').format(d);
+'@
+
+Write-File 'lib/core/widgets/placeholder_view.dart' @'
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+
+/// Temporary page for modules that are not implemented yet.
+class PlaceholderView extends StatelessWidget {
+  const PlaceholderView({super.key, required this.titleKey});
+  final String titleKey;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(titleKey.tr)),
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.construction, size: 56),
+            const SizedBox(height: 12),
+            Text('coming_soon'.tr),
+          ],
+        ),
+      ),
+    );
+  }
+}
+'@
+
+# ---------------------------------------------------------------- routes
+Write-File 'lib/routes/app_routes.dart' @'
+abstract class Routes {
+  static const splash = '/splash';
+  static const pin = '/pin';
+  static const home = '/home';
+  static const properties = '/properties';
+  static const units = '/units';
+  static const services = '/services';
+  static const tenants = '/tenants';
+  static const contracts = '/contracts';
+  static const obligations = '/obligations';
+  static const payments = '/payments';
+  static const documents = '/documents';
+  static const reports = '/reports';
+  static const settings = '/settings';
+  static const about = '/about';
+  static const notFound = '/not-found';
+}
+'@
+
+Write-File 'lib/routes/pin_middleware.dart' @'
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+
+import '../core/services/session_service.dart';
+import '../core/services/storage_service.dart';
+import 'app_routes.dart';
+
+class PinMiddleware extends GetMiddleware {
+  @override
+  int? get priority => 1;
+
+  @override
+  RouteSettings? redirect(String? route) {
+    final storage = Get.find<StorageService>();
+    final session = Get.find<SessionService>();
+    if (storage.hasPin && !session.unlocked) {
+      return const RouteSettings(name: Routes.pin);
+    }
+    return null;
+  }
+}
+'@
+
+Write-File 'lib/routes/app_pages.dart' @'
+import 'package:get/get.dart';
+
+import '../core/widgets/placeholder_view.dart';
+import '../features/home/presentation/home_binding.dart';
+import '../features/home/presentation/home_view.dart';
+import '../features/pin/presentation/pin_binding.dart';
+import '../features/pin/presentation/pin_view.dart';
+import '../features/properties/presentation/properties_binding.dart';
+import '../features/properties/presentation/properties_view.dart';
+import '../features/settings/presentation/settings_binding.dart';
+import '../features/settings/presentation/settings_view.dart';
+import '../features/splash/presentation/splash_view.dart';
+import 'app_routes.dart';
+import 'pin_middleware.dart';
+
+class AppPages {
+  static final _guard = [PinMiddleware()];
+
+  static GetPage _placeholder(String route, String titleKey) => GetPage(
+        name: route,
+        page: () => PlaceholderView(titleKey: titleKey),
+        middlewares: _guard,
+      );
+
+  static final notFound = GetPage(
+    name: Routes.notFound,
+    page: () => const PlaceholderView(titleKey: 'not_found'),
+  );
+
+  static final pages = <GetPage>[
+    GetPage(name: Routes.splash, page: () => const SplashView()),
+    GetPage(
+      name: Routes.pin,
+      page: () => const PinView(),
+      binding: PinBinding(),
+    ),
+    GetPage(
+      name: Routes.home,
+      page: () => const HomeView(),
+      binding: HomeBinding(),
+      middlewares: _guard,
+    ),
+    GetPage(
+      name: Routes.properties,
+      page: () => const PropertiesView(),
+      binding: PropertiesBinding(),
+      middlewares: _guard,
+    ),
+    GetPage(
+      name: Routes.settings,
+      page: () => const SettingsView(),
+      binding: SettingsBinding(),
+      middlewares: _guard,
+    ),
+    _placeholder(Routes.units, 'units'),
+    _placeholder(Routes.services, 'services'),
+    _placeholder(Routes.tenants, 'tenants'),
+    _placeholder(Routes.contracts, 'contracts'),
+    _placeholder(Routes.obligations, 'obligations'),
+    _placeholder(Routes.payments, 'payments'),
+    _placeholder(Routes.documents, 'documents'),
+    _placeholder(Routes.reports, 'reports'),
+    _placeholder(Routes.about, 'about'),
+  ];
+}
+'@
+
+# ---------------------------------------------------------------- feature: splash
+Write-File 'lib/features/splash/presentation/splash_view.dart' @'
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+
+import '../../../core/services/obligation_service.dart';
+import '../../../routes/app_routes.dart';
+
+class SplashView extends StatefulWidget {
+  const SplashView({super.key});
+
+  @override
+  State<SplashView> createState() => _SplashViewState();
+}
+
+class _SplashViewState extends State<SplashView> {
+  @override
+  void initState() {
+    super.initState();
+    _boot();
+  }
+
+  Future<void> _boot() async {
+    // Catch up on any monthly obligations missed while the app was closed.
+    try {
+      await Get.find<ObligationService>().runCatchUp();
+    } catch (e) {
+      debugPrint('Obligation catch-up failed: $e');
+    }
+    await Future.delayed(const Duration(milliseconds: 600));
+    // PinMiddleware redirects to the PIN screen when needed.
+    Get.offAllNamed(Routes.home);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.apartment,
+                size: 88, color: Theme.of(context).colorScheme.primary),
+            const SizedBox(height: 16),
+            Text('app_name'.tr,
+                style: Theme.of(context).textTheme.headlineSmall),
+            const SizedBox(height: 24),
+            const CircularProgressIndicator(),
+          ],
+        ),
+      ),
+    );
+  }
+}
+'@
+
+# ---------------------------------------------------------------- feature: pin
+Write-File 'lib/features/pin/presentation/pin_controller.dart' @'
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+
+import '../../../core/services/session_service.dart';
+import '../../../core/services/storage_service.dart';
+import '../../../routes/app_routes.dart';
+
+class PinController extends GetxController {
+  final input = TextEditingController();
+  final error = ''.obs;
+
+  void submit() {
+    final storage = Get.find<StorageService>();
+    if (storage.verifyPin(input.text)) {
+      Get.find<SessionService>().unlocked = true;
+      Get.offAllNamed(Routes.home);
+    } else {
+      error.value = 'wrong_pin'.tr;
+      input.clear();
+    }
+  }
+
+  @override
+  void onClose() {
+    input.dispose();
+    super.onClose();
+  }
+}
+'@
+
+Write-File 'lib/features/pin/presentation/pin_binding.dart' @'
+import 'package:get/get.dart';
+
+import 'pin_controller.dart';
+
+class PinBinding extends Bindings {
+  @override
+  void dependencies() => Get.lazyPut(() => PinController());
+}
+'@
+
+Write-File 'lib/features/pin/presentation/pin_view.dart' @'
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:get/get.dart';
+
+import 'pin_controller.dart';
+
+class PinView extends GetView<PinController> {
+  const PinView({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: false,
+      child: Scaffold(
+        body: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 320),
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.lock_outline, size: 64),
+                  const SizedBox(height: 16),
+                  Text('enter_pin'.tr,
+                      style: Theme.of(context).textTheme.titleLarge),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: controller.input,
+                    obscureText: true,
+                    autofocus: true,
+                    textAlign: TextAlign.center,
+                    keyboardType: TextInputType.number,
+                    maxLength: 6,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    onSubmitted: (_) => controller.submit(),
+                  ),
+                  Obx(() => controller.error.value.isEmpty
+                      ? const SizedBox.shrink()
+                      : Text(controller.error.value,
+                          style: TextStyle(
+                              color: Theme.of(context).colorScheme.error))),
+                  const SizedBox(height: 12),
+                  FilledButton(
+                    onPressed: controller.submit,
+                    child: Text('unlock'.tr),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+'@
+
+# ---------------------------------------------------------------- feature: home / dashboard
+Write-File 'lib/features/home/presentation/home_controller.dart' @'
+import 'package:get/get.dart';
+
+import '../../../core/services/database_service.dart';
+import '../../../core/services/obligation_service.dart';
+
+class DashboardStats {
+  int properties = 0,
+      units = 0,
+      rented = 0,
+      available = 0,
+      tenants = 0,
+      activeContracts = 0;
+  double dueThisMonth = 0, paid = 0, remaining = 0, overdue = 0;
+}
+
+class HomeController extends GetxController with StateMixin<DashboardStats> {
+  DatabaseService get _db => Get.find<DatabaseService>();
+
+  @override
+  void onInit() {
+    super.onInit();
+    load();
+  }
+
+  Future<int> _count(String sql, [List<Object?>? args]) async {
+    final r = await _db.db.rawQuery(sql, args);
+    return (r.first.values.first as int?) ?? 0;
+  }
+
+  Future<double> _sum(String sql, [List<Object?>? args]) async {
+    final r = await _db.db.rawQuery(sql, args);
+    return ((r.first.values.first as num?) ?? 0).toDouble();
+  }
+
+  Future<void> load() async {
+    change(null, status: RxStatus.loading());
+    try {
+      final s = DashboardStats();
+      final period = ObligationService.periodOf(DateTime.now());
+
+      s.properties = await _count('SELECT COUNT(*) FROM properties');
+      s.units = await _count('SELECT COUNT(*) FROM units');
+      s.rented = await _count("SELECT COUNT(*) FROM units WHERE status='rented'");
+      s.available =
+          await _count("SELECT COUNT(*) FROM units WHERE status='available'");
+      s.tenants = await _count('SELECT COUNT(*) FROM tenants');
+      s.activeContracts =
+          await _count("SELECT COUNT(*) FROM contracts WHERE status='active'");
+
+      s.dueThisMonth = await _sum(
+          "SELECT SUM(amount) FROM obligations WHERE period=? AND status!='cancelled'",
+          [period]);
+      s.paid = await _sum(
+          "SELECT SUM(paid_amount) FROM obligations WHERE period=? AND status!='cancelled'",
+          [period]);
+      s.remaining = s.dueThisMonth - s.paid;
+      s.overdue = await _sum(
+          "SELECT SUM(amount - paid_amount) FROM obligations WHERE status='overdue'");
+
+      change(s, status: RxStatus.success());
+    } catch (e) {
+      change(null, status: RxStatus.error(e.toString()));
+    }
+  }
+}
+'@
+
+Write-File 'lib/features/home/presentation/home_binding.dart' @'
+import 'package:get/get.dart';
+
+import 'home_controller.dart';
+
+class HomeBinding extends Bindings {
+  @override
+  void dependencies() => Get.lazyPut(() => HomeController(), fenix: true);
+}
+'@
+
+Write-File 'lib/features/home/presentation/home_view.dart' @'
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+
+import '../../../core/utils/formatters.dart';
+import '../../../routes/app_routes.dart';
+import 'home_controller.dart';
+
+class HomeView extends GetView<HomeController> {
+  const HomeView({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('dashboard'.tr),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: () => Get.toNamed(Routes.settings),
+          ),
+        ],
+      ),
+      body: RefreshIndicator(
+        onRefresh: controller.load,
+        child: controller.obx(
+          (s) => ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              _grid([
+                _Stat('properties'.tr, '${s!.properties}', Icons.apartment),
+                _Stat('units'.tr, '${s.units}', Icons.meeting_room),
+                _Stat('rented_units'.tr, '${s.rented}', Icons.key),
+                _Stat('available_units'.tr, '${s.available}', Icons.door_front_door),
+                _Stat('tenants'.tr, '${s.tenants}', Icons.people),
+                _Stat('active_contracts'.tr, '${s.activeContracts}', Icons.description),
+                _Stat('due_this_month'.tr, formatMoney(s.dueThisMonth), Icons.request_quote),
+                _Stat('paid'.tr, formatMoney(s.paid), Icons.payments),
+                _Stat('remaining'.tr, formatMoney(s.remaining), Icons.hourglass_bottom),
+                _Stat('overdue'.tr, formatMoney(s.overdue), Icons.warning_amber),
+              ]),
+              const SizedBox(height: 24),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  _chip('properties'.tr, Icons.apartment, Routes.properties),
+                  _chip('units'.tr, Icons.meeting_room, Routes.units),
+                  _chip('tenants'.tr, Icons.people, Routes.tenants),
+                  _chip('services'.tr, Icons.build, Routes.services),
+                  _chip('contracts'.tr, Icons.description, Routes.contracts),
+                  _chip('obligations'.tr, Icons.request_quote, Routes.obligations),
+                  _chip('payments'.tr, Icons.payments, Routes.payments),
+                  _chip('documents'.tr, Icons.folder, Routes.documents),
+                  _chip('reports'.tr, Icons.bar_chart, Routes.reports),
+                ],
+              ),
+            ],
+          ),
+          onLoading: const Center(child: CircularProgressIndicator()),
+          onError: (e) => Center(child: Text(e ?? '')),
+        ),
+      ),
+    );
+  }
+
+  Widget _chip(String label, IconData icon, String route) => ActionChip(
+        avatar: Icon(icon, size: 18),
+        label: Text(label),
+        onPressed: () => Get.toNamed(route),
+      );
+
+  Widget _grid(List<_Stat> stats) => GridView.count(
+        crossAxisCount: 2,
+        shrinkWrap: true,
+        physics: const NeverScrollableScrollPhysics(),
+        mainAxisSpacing: 10,
+        crossAxisSpacing: 10,
+        childAspectRatio: 1.7,
+        children: stats.map((e) => e.build()).toList(),
+      );
+}
+
+class _Stat {
+  _Stat(this.label, this.value, this.icon);
+  final String label, value;
+  final IconData icon;
+
+  Widget build() => Card(
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Row(children: [Icon(icon, size: 18), const SizedBox(width: 6), Flexible(child: Text(label, overflow: TextOverflow.ellipsis))]),
+              const SizedBox(height: 6),
+              FittedBox(
+                child: Text(value,
+                    style: const TextStyle(
+                        fontSize: 20, fontWeight: FontWeight.bold)),
+              ),
+            ],
+          ),
+        ),
+      );
+}
+'@
+
+# ---------------------------------------------------------------- feature: properties (reference vertical slice)
+Write-File 'lib/features/properties/data/property_model.dart' @'
+class PropertyModel {
+  PropertyModel({
+    this.id,
+    required this.name,
+    this.description,
+    this.address,
+    this.floors = 1,
+    this.notes,
+    this.isActive = true,
+  });
+
+  final int? id;
+  final String name;
+  final String? description;
+  final String? address;
+  final int floors;
+  final String? notes;
+  final bool isActive;
+
+  Map<String, Object?> toMap() => {
+        if (id != null) 'id': id,
+        'name': name,
+        'description': description,
+        'address': address,
+        'floors': floors,
+        'notes': notes,
+        'is_active': isActive ? 1 : 0,
+      };
+
+  factory PropertyModel.fromMap(Map<String, Object?> m) => PropertyModel(
+        id: m['id'] as int?,
+        name: m['name'] as String,
+        description: m['description'] as String?,
+        address: m['address'] as String?,
+        floors: (m['floors'] as int?) ?? 1,
+        notes: m['notes'] as String?,
+        isActive: (m['is_active'] as int? ?? 1) == 1,
+      );
+}
+'@
+
+Write-File 'lib/features/properties/data/property_repository.dart' @'
+import 'package:get/get.dart';
+
+import '../../../core/services/database_service.dart';
+import 'property_model.dart';
+
+class PropertyRepository {
+  DatabaseService get _db => Get.find<DatabaseService>();
+
+  Future<List<PropertyModel>> getAll() async {
+    final rows = await _db.db.query('properties', orderBy: 'name COLLATE NOCASE');
+    return rows.map(PropertyModel.fromMap).toList();
+  }
+
+  Future<int> insert(PropertyModel p) => _db.db.insert('properties', p.toMap());
+
+  Future<int> update(PropertyModel p) =>
+      _db.db.update('properties', p.toMap(), where: 'id = ?', whereArgs: [p.id]);
+
+  Future<int> unitCount(int propertyId) async {
+    final r = await _db.db.rawQuery(
+        'SELECT COUNT(*) AS c FROM units WHERE property_id = ?', [propertyId]);
+    return (r.first['c'] as int?) ?? 0;
+  }
+
+  Future<int> delete(int id) =>
+      _db.db.delete('properties', where: 'id = ?', whereArgs: [id]);
+}
+'@
+
+Write-File 'lib/features/properties/presentation/properties_controller.dart' @'
+import 'package:get/get.dart';
+
+import '../data/property_model.dart';
+import '../data/property_repository.dart';
+
+class PropertiesController extends GetxController
+    with StateMixin<List<PropertyModel>> {
+  final PropertyRepository _repo = Get.find<PropertyRepository>();
+
+  @override
+  void onInit() {
+    super.onInit();
+    load();
+  }
+
+  Future<void> load() async {
+    change(null, status: RxStatus.loading());
+    try {
+      final list = await _repo.getAll();
+      change(list,
+          status: list.isEmpty ? RxStatus.empty() : RxStatus.success());
+    } catch (e) {
+      change(null, status: RxStatus.error(e.toString()));
+    }
+  }
+
+  Future<void> save(PropertyModel p) async {
+    if (p.id == null) {
+      await _repo.insert(p);
+    } else {
+      await _repo.update(p);
+    }
+    await load();
+  }
+
+  Future<void> remove(PropertyModel p) async {
+    // Business rule: never orphan units / contracts / financial history.
+    if (await _repo.unitCount(p.id!) > 0) {
+      Get.snackbar('delete'.tr, 'cannot_delete_has_units'.tr);
+      return;
+    }
+    await _repo.delete(p.id!);
+    await load();
+  }
+}
+'@
+
+Write-File 'lib/features/properties/presentation/properties_binding.dart' @'
+import 'package:get/get.dart';
+
+import 'properties_controller.dart';
+
+class PropertiesBinding extends Bindings {
+  @override
+  void dependencies() => Get.lazyPut(() => PropertiesController());
+}
+'@
+
+Write-File 'lib/features/properties/presentation/properties_view.dart' @'
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+
+import '../data/property_model.dart';
+import 'properties_controller.dart';
+
+class PropertiesView extends GetView<PropertiesController> {
+  const PropertiesView({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text('properties'.tr)),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => _openForm(),
+        child: const Icon(Icons.add),
+      ),
+      body: controller.obx(
+        (list) => ListView.separated(
+          padding: const EdgeInsets.all(12),
+          itemCount: list!.length,
+          separatorBuilder: (_, __) => const SizedBox(height: 8),
+          itemBuilder: (_, i) {
+            final p = list[i];
+            return Card(
+              child: ListTile(
+                leading: const Icon(Icons.apartment),
+                title: Text(p.name),
+                subtitle: Text(p.address ?? ''),
+                onTap: () => _openForm(existing: p),
+                trailing: IconButton(
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: () => _confirmDelete(p),
+                ),
+              ),
+            );
+          },
+        ),
+        onEmpty: Center(child: Text('no_data'.tr)),
+        onLoading: const Center(child: CircularProgressIndicator()),
+        onError: (e) => Center(child: Text(e ?? '')),
+      ),
+    );
+  }
+
+  void _confirmDelete(PropertyModel p) {
+    Get.defaultDialog(
+      title: 'confirm'.tr,
+      middleText: 'delete_confirm'.tr,
+      textConfirm: 'delete'.tr,
+      textCancel: 'cancel'.tr,
+      onConfirm: () {
+        Get.back();
+        controller.remove(p);
+      },
+    );
+  }
+
+  void _openForm({PropertyModel? existing}) {
+    final formKey = GlobalKey<FormState>();
+    final name = TextEditingController(text: existing?.name);
+    final address = TextEditingController(text: existing?.address);
+    final desc = TextEditingController(text: existing?.description);
+    final floors =
+        TextEditingController(text: (existing?.floors ?? 1).toString());
+    final notes = TextEditingController(text: existing?.notes);
+
+    Get.bottomSheet(
+      Container(
+        color: Get.theme.colorScheme.surface,
+        padding: EdgeInsets.only(
+          left: 16,
+          right: 16,
+          top: 16,
+          bottom: MediaQuery.of(Get.context!).viewInsets.bottom + 16,
+        ),
+        child: SingleChildScrollView(
+          child: Form(
+            key: formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: name,
+                  decoration: InputDecoration(labelText: 'name'.tr),
+                  validator: (v) =>
+                      (v == null || v.trim().isEmpty) ? 'required'.tr : null,
+                ),
+                const SizedBox(height: 10),
+                TextFormField(
+                    controller: address,
+                    decoration: InputDecoration(labelText: 'address'.tr)),
+                const SizedBox(height: 10),
+                TextFormField(
+                    controller: desc,
+                    decoration: InputDecoration(labelText: 'description'.tr)),
+                const SizedBox(height: 10),
+                TextFormField(
+                  controller: floors,
+                  keyboardType: TextInputType.number,
+                  decoration: InputDecoration(labelText: 'floors'.tr),
+                ),
+                const SizedBox(height: 10),
+                TextFormField(
+                    controller: notes,
+                    maxLines: 2,
+                    decoration: InputDecoration(labelText: 'notes'.tr)),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                          onPressed: Get.back, child: Text('cancel'.tr)),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: FilledButton(
+                        onPressed: () async {
+                          if (!formKey.currentState!.validate()) return;
+                          await controller.save(PropertyModel(
+                            id: existing?.id,
+                            name: name.text.trim(),
+                            address: address.text.trim(),
+                            description: desc.text.trim(),
+                            floors: int.tryParse(floors.text) ?? 1,
+                            notes: notes.text.trim(),
+                            isActive: existing?.isActive ?? true,
+                          ));
+                          Get.back();
+                        },
+                        child: Text('save'.tr),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      isScrollControlled: true,
+    );
+  }
+}
+'@
+
+# ---------------------------------------------------------------- feature: settings
+Write-File 'lib/features/settings/presentation/settings_controller.dart' @'
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+import 'package:share_plus/share_plus.dart';
+
+import '../../../core/services/database_service.dart';
+import '../../../core/services/storage_service.dart';
+
+class SettingsController extends GetxController {
+  final StorageService storage = Get.find<StorageService>();
+
+  final isArabic = false.obs;
+  final isDark = false.obs;
+  final hasPin = false.obs;
+
+  @override
+  void onInit() {
+    super.onInit();
+    isArabic.value = storage.locale.languageCode == 'ar';
+    isDark.value = storage.themeMode == ThemeMode.dark;
+    hasPin.value = storage.hasPin;
+
+    // Workers: react to switches.
+    ever(isArabic, (bool v) => storage.setLang(v ? 'ar' : 'en'));
+    ever(isDark, (bool v) => storage.setDark(v));
+  }
+
+  Future<void> setPin(String pin) async {
+    if (pin.length < 4 || pin.length > 6) return;
+    await storage.setPin(pin);
+    hasPin.value = true;
+  }
+
+  Future<void> removePin() async {
+    await storage.removePin();
+    hasPin.value = false;
+  }
+
+  Future<void> backup() async {
+    final file = await Get.find<DatabaseService>().createBackupCopy();
+    await Share.shareXFiles([XFile(file.path)]);
+  }
+}
+'@
+
+Write-File 'lib/features/settings/presentation/settings_binding.dart' @'
+import 'package:get/get.dart';
+
+import 'settings_controller.dart';
+
+class SettingsBinding extends Bindings {
+  @override
+  void dependencies() => Get.lazyPut(() => SettingsController());
+}
+'@
+
+Write-File 'lib/features/settings/presentation/settings_view.dart' @'
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:get/get.dart';
+
+import 'settings_controller.dart';
+
+class SettingsView extends GetView<SettingsController> {
+  const SettingsView({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text('settings'.tr)),
+      body: ListView(
+        children: [
+          Obx(() => SwitchListTile(
+                title: Text('language'.tr),
+                subtitle: Text(controller.isArabic.value ? 'العربية' : 'English'),
+                value: controller.isArabic.value,
+                onChanged: (v) => controller.isArabic.value = v,
+              )),
+          Obx(() => SwitchListTile(
+                title: Text('theme_dark'.tr),
+                value: controller.isDark.value,
+                onChanged: (v) => controller.isDark.value = v,
+              )),
+          ListTile(
+            leading: const Icon(Icons.lock),
+            title: Text('set_pin'.tr),
+            onTap: _pinDialog,
+          ),
+          Obx(() => controller.hasPin.value
+              ? ListTile(
+                  leading: const Icon(Icons.lock_open),
+                  title: Text('remove_pin'.tr),
+                  onTap: controller.removePin,
+                )
+              : const SizedBox.shrink()),
+          ListTile(
+            leading: const Icon(Icons.backup),
+            title: Text('backup'.tr),
+            onTap: controller.backup,
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _pinDialog() {
+    final c = TextEditingController();
+    Get.defaultDialog(
+      title: 'set_pin'.tr,
+      content: TextField(
+        controller: c,
+        obscureText: true,
+        maxLength: 6,
+        keyboardType: TextInputType.number,
+        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+        decoration: InputDecoration(labelText: 'new_pin'.tr),
+      ),
+      textConfirm: 'save'.tr,
+      textCancel: 'cancel'.tr,
+      onConfirm: () async {
+        await controller.setPin(c.text);
+        Get.back();
+      },
+    );
+  }
+}
+'@
+
+# ---------------------------------------------------------------- contract PDF (skeleton)
+Write-File 'lib/features/contracts/data/contract_pdf_service.dart' @'
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:flutter/services.dart' show rootBundle;
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+
+class ContractPdfData {
+  ContractPdfData({
+    required this.ownerName,
+    required this.ownerId,
+    required this.ownerPhone,
+    required this.tenantName,
+    required this.tenantId,
+    required this.tenantPhone,
+    required this.propertyName,
+    required this.propertyAddress,
+    required this.unitNumber,
+    required this.rent,
+    required this.currency,
+    required this.deposit,
+    required this.startDate,
+    required this.endDate,
+    required this.paymentCycle,
+    required this.termsText,
+  });
+
+  final String ownerName, ownerId, ownerPhone;
+  final String tenantName, tenantId, tenantPhone;
+  final String propertyName, propertyAddress, unitNumber;
+  final double rent, deposit;
+  final String currency, startDate, endDate, paymentCycle, termsText;
+}
+
+/// Builds a printable contract PDF. Signature, thumbprint and witness areas
+/// are intentionally left blank for manual completion after printing.
+class ContractPdfService {
+  Future<pw.Font?> _font(String asset) async {
+    try {
+      return pw.Font.ttf(await rootBundle.load(asset));
+    } catch (_) {
+      return null; // font file missing -> Arabic will not render
+    }
+  }
+
+  Future<Uint8List> build(ContractPdfData d, {bool rtl = true}) async {
+    final regular = await _font('assets/fonts/Cairo-Regular.ttf');
+    final bold = await _font('assets/fonts/Cairo-Bold.ttf');
+    final doc = pw.Document(
+      theme: (regular != null && bold != null)
+          ? pw.ThemeData.withFont(base: regular, bold: bold)
+          : null,
+    );
+
+    pw.Widget row(String k, String v) => pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(vertical: 2),
+          child: pw.Row(children: [
+            pw.SizedBox(
+                width: 120,
+                child: pw.Text(k,
+                    style: pw.TextStyle(fontWeight: pw.FontWeight.bold))),
+            pw.Expanded(child: pw.Text(v)),
+          ]),
+        );
+
+    pw.Widget box(String label) => pw.Container(
+          width: 160,
+          height: 70,
+          decoration: pw.BoxDecoration(border: pw.Border.all()),
+          padding: const pw.EdgeInsets.all(4),
+          child: pw.Text(label, style: const pw.TextStyle(fontSize: 9)),
+        );
+
+    pw.Widget sigRow(String who) => pw.Padding(
+          padding: const pw.EdgeInsets.only(top: 10),
+          child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+            pw.Text(who, style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+            pw.SizedBox(height: 4),
+            pw.Row(
+              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+              children: [box('Signature / التوقيع'), box('Thumbprint / البصمة')],
+            ),
+          ]),
+        );
+
+    doc.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        textDirection: rtl ? pw.TextDirection.rtl : pw.TextDirection.ltr,
+        margin: const pw.EdgeInsets.all(32),
+        build: (_) => [
+          pw.Center(
+            child: pw.Text('عقد إيجار / Lease Agreement',
+                style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold)),
+          ),
+          pw.SizedBox(height: 16),
+          pw.Text('Owner / المالك', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+          row('Name', d.ownerName),
+          row('ID', d.ownerId),
+          row('Phone', d.ownerPhone),
+          pw.SizedBox(height: 8),
+          pw.Text('Tenant / المستأجر', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+          row('Name', d.tenantName),
+          row('ID', d.tenantId),
+          row('Phone', d.tenantPhone),
+          pw.SizedBox(height: 8),
+          pw.Text('Property / العقار', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+          row('Property', d.propertyName),
+          row('Address', d.propertyAddress),
+          row('Unit', d.unitNumber),
+          pw.SizedBox(height: 8),
+          pw.Text('Financial & Term / المالية والمدة',
+              style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+          row('Rent', '${d.rent.toStringAsFixed(2)} ${d.currency}'),
+          row('Deposit', '${d.deposit.toStringAsFixed(2)} ${d.currency}'),
+          row('Cycle', d.paymentCycle),
+          row('Start', d.startDate),
+          row('End', d.endDate),
+          pw.SizedBox(height: 8),
+          pw.Text('Terms / الشروط', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+          pw.Text(d.termsText),
+          pw.SizedBox(height: 16),
+          sigRow('Owner / المالك'),
+          sigRow('Tenant / المستأجر'),
+          sigRow('Witness 1 / الشاهد الأول:  ____________________'),
+          sigRow('Witness 2 / الشاهد الثاني:  ____________________'),
+          pw.SizedBox(height: 12),
+          pw.Text('Date / التاريخ: ____ / ____ / ________'),
+        ],
+      ),
+    );
+    return doc.save();
+  }
+
+  Future<File> saveTo(File target, ContractPdfData d) async {
+    return target.writeAsBytes(await build(d));
+  }
+}
+'@
+
+# ---------------------------------------------------------------- feature folders (clean architecture layers)
+$features = 'splash','pin','home','properties','units','services','tenants','contracts','financial_obligations','payments','documents','reports','settings'
+foreach ($f in $features) {
+  foreach ($layer in 'data','domain','presentation') {
+    $dir = Join-Path $Root "lib\features\$f\$layer"
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $keep = Join-Path $dir '.gitkeep'
+    if ((Get-ChildItem $dir -Force | Measure-Object).Count -eq 0) { New-Item -ItemType File -Path $keep -Force | Out-Null }
+  }
+}
+
+# ---------------------------------------------------------------- README
+Write-File 'README_PTMS.md' @'
+# PTMS - Property & Tenant Management System
+
+Flutter / Android / GetX / SQLite (local-first, single owner).
+
+## Run
+    flutter pub get
+    flutter run
+
+## What is included
+- GetX app shell: bindings, named routes, PIN middleware, translations (AR/EN, RTL), theme switch
+- SQLite schema for all entities (properties, units, tenants, contracts, services, obligations, payments, documents)
+- ObligationService: idempotent monthly rent catch-up on app start (UNIQUE contract+period+type)
+- Dashboard with live stats, Settings (language, theme, PIN, DB backup/share)
+- Properties: complete vertical slice (model -> repository -> controller (StateMixin) -> view). Copy this pattern for the other modules
+- Contract PDF skeleton with blank signature / thumbprint / two-witness areas
+- Placeholder pages for the remaining modules
+
+## Next steps
+1. Put Cairo-Regular.ttf and Cairo-Bold.ttf in assets/fonts/ (needed for Arabic in PDFs)
+2. Build Units, Tenants, Contracts (copy the Properties slice)
+3. Extend ObligationService with services (fixed / consumption / shared splits)
+4. Payments: update obligations.paid_amount and status in one transaction
+5. Restore-from-backup, reports, receipts
+
+## Open decisions (from SRS section 9)
+Currency, shared-service split method, contract templates, due-day per contract, proration, backup/restore.
+'@
+
+# ---------------------------------------------------------------- finish
+if ($hasFlutter) {
+  Push-Location $Root
+  try {
+    Write-Host "Running flutter pub get ..." -ForegroundColor Cyan
+    & flutter pub get
+  } finally { Pop-Location }
+}
+
+Write-Host ""
+Write-Host "Done. Project created at: $Root" -ForegroundColor Green
+Write-Host "Next: cd `"$Root`"; flutter run" -ForegroundColor Green
